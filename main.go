@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -18,10 +19,18 @@ import (
 
 const usage = "Usage: nomadlogs [ls | tail] [flags] [job:task]...\n" +
 	"  nomadlogs tail -h\n" +
-	"  nomadlogs ls -h\n"
+	"  nomadlogs ls -h"
+
+func printUsage() {
+	fmt.Println("nomadlogs " + getVersion() + "\n")
+	fmt.Println(usage)
+	fmt.Println("\nOptions:")
+	fmt.Println("  -v, --version    print version")
+	fmt.Println("  -h               help")
+}
 
 func printUsageAndExit() {
-	fmt.Printf(usage)
+	printUsage()
 	os.Exit(1)
 }
 
@@ -53,7 +62,7 @@ type nomadTask struct {
 	task string
 }
 
-type tailCommand struct {
+type TailCommand struct {
 	n          string
 	follow     bool
 	nomadTasks []nomadTask
@@ -61,7 +70,7 @@ type tailCommand struct {
 	jsonFormat bool
 }
 
-func (tail *tailCommand) Run() error {
+func (tail *TailCommand) Run() error {
 	var wg sync.WaitGroup
 	for _, task := range tail.nomadTasks {
 		wg.Add(1)
@@ -86,7 +95,7 @@ func (tail *tailCommand) Run() error {
 	return nil
 }
 
-func NewTailCommand(n string, follow bool, addr string, jsonFormat bool, tasks []string) (*tailCommand, error) {
+func NewTailCommand(n string, follow bool, addr string, jsonFormat bool, tasks []string) (*TailCommand, error) {
 	cfg := nomad.DefaultConfig()
 	cfg.Address = addr
 	client, err := nomad.NewClient(cfg)
@@ -109,22 +118,52 @@ func NewTailCommand(n string, follow bool, addr string, jsonFormat bool, tasks [
 			nomadTasks = append(nomadTasks, nomadTask{"", split[0]})
 		}
 	}
-	return &tailCommand{n, follow, nomadTasks, client, jsonFormat}, nil
+	return &TailCommand{n, follow, nomadTasks, client, jsonFormat}, nil
 }
 
-type allocation struct {
-	allocationId string
-	jobId        string
-	task         string
-	state        string
-	taskGroup    string
-	lastRestart  time.Time
+func getVersion() string {
+	if info, ok := debug.ReadBuildInfo(); ok {
+		version := info.Main.Version
+		path := info.Main.Path
+
+		// When installed via go install, Main.Path might be empty but we can check deps
+		if path == "" || version == "(devel)" {
+			// During development or when path is empty, check build settings
+			for _, setting := range info.Settings {
+				if setting.Key == "vcs.revision" && len(setting.Value) >= 7 {
+					version = fmt.Sprintf("(devel-%s)", setting.Value[:7])
+				}
+			}
+			// If still no path, use the module path
+			if path == "" {
+				path = info.Path
+			}
+		}
+
+		// Include module path (repository) in version output
+		return fmt.Sprintf("%s (%s)", version, path)
+	}
+	return "unknown"
 }
 
 func main() {
 	// write meta logs to stderr, actual program output to stdout
 	log.SetOutput(os.Stderr)
 	log.SetPrefix("nomadlogs ")
+
+	// Handle top-level flags before subcommands
+	versionFlag := flag.Bool("v", false, "print version")
+	versionLongFlag := flag.Bool("version", false, "print version")
+	flag.Usage = printUsage
+
+	// Parse just the top-level flags
+	flag.Parse()
+
+	// Check for version flag
+	if *versionFlag || *versionLongFlag {
+		fmt.Printf("nomadlogs %s\n", getVersion())
+		os.Exit(0)
+	}
 
 	tailCmd.Usage = printTailUsage
 	tailN := tailCmd.String("n", "10", "last n lines of logs use +NUM to start at line NUM")
@@ -135,15 +174,13 @@ func main() {
 	lsCmd.Usage = printLsUsage
 	lsAddr := lsCmd.String("addr", nomad.DefaultConfig().Address, "nomad address (also set via NOMAD_ADDR env var)\n")
 
-	flag.Parse()
-
-	if len(os.Args) < 2 {
+	if len(flag.Args()) < 1 {
 		printUsageAndExit()
 	}
 
-	switch os.Args[1] {
+	switch flag.Args()[0] {
 	case "tail":
-		err := tailCmd.Parse(os.Args[2:])
+		err := tailCmd.Parse(flag.Args()[1:])
 		if err != nil {
 			tailCmd.Usage()
 			os.Exit(1)
@@ -158,7 +195,7 @@ func main() {
 			log.Fatalf("Run: %v\n", err)
 		}
 	case "ls":
-		err := lsCmd.Parse(os.Args[2:])
+		err := lsCmd.Parse(flag.Args()[1:])
 		if err != nil {
 			lsCmd.Usage()
 			os.Exit(1)
@@ -277,7 +314,7 @@ func (line logLine) JSONFormat() string {
 	return string(newLine)
 }
 
-type watcher struct {
+type Watcher struct {
 	job                string
 	task               string
 	client             *nomad.Client
@@ -286,17 +323,17 @@ type watcher struct {
 	pollInterval       time.Duration
 }
 
-func NewWatcher(job, task string, client *nomad.Client) *watcher {
-	return &watcher{job, task, client, sync.Mutex{}, make(map[string]struct{}), time.Second * 5}
+func NewWatcher(job, task string, client *nomad.Client) *Watcher {
+	return &Watcher{job, task, client, sync.Mutex{}, make(map[string]struct{}), time.Second * 5}
 }
 
-func (jw *watcher) run() chan logLine {
+func (jw *Watcher) run() chan logLine {
 	lines := make(chan logLine, 1000)
 	go jw.poll(lines)
 	return lines
 }
 
-func (jw *watcher) poll(lines chan logLine) {
+func (jw *Watcher) poll(lines chan logLine) {
 	for range time.Tick(jw.pollInterval) {
 		allocationList, _, err := jw.client.Allocations().List(nil)
 		if err != nil {
@@ -330,7 +367,7 @@ func (jw *watcher) poll(lines chan logLine) {
 				jw.mu.Unlock()
 
 				// watch the stream until it's done
-				jw.watchAllocationLogs(allocation, lines)
+				_ = jw.watchAllocationLogs(allocation, lines)
 
 				jw.mu.Lock()
 				delete(jw.allocationsWatched, allocation.ID)
@@ -344,7 +381,7 @@ func (jw *watcher) poll(lines chan logLine) {
 // JSON objects. We do our best to recombine split lines so they can be parsed as JSON.
 // The first frame's first line might not be rescuable, but we'll try to recombine the rest by taking the
 // prior frame's last line and concatenating it to the current frame's first line.
-func (jw *watcher) handleFrame(frame *nomad.StreamFrame, allocation *nomad.Allocation, lines chan logLine, previous *string) {
+func (jw *Watcher) handleFrame(frame *nomad.StreamFrame, allocation *nomad.Allocation, lines chan logLine, previous *string) {
 
 	firstLine := true // use instead of i to handle blank lines
 	for _, line := range strings.Split(string(frame.Data), "\n") {
@@ -370,7 +407,7 @@ func (jw *watcher) handleFrame(frame *nomad.StreamFrame, allocation *nomad.Alloc
 	}
 }
 
-func (jw *watcher) watchAllocationLogs(allocation *nomad.Allocation, lines chan logLine) error {
+func (jw *Watcher) watchAllocationLogs(allocation *nomad.Allocation, lines chan logLine) error {
 	stdoutFrames, stdoutErrChan := jw.client.AllocFS().Logs(allocation, true, jw.task, "stdout", "end", 0, nil, nil)
 	stderrFrames, stderrErrChan := jw.client.AllocFS().Logs(allocation, true, jw.task, "stderr", "end", 0, nil, nil)
 
