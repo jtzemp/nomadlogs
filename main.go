@@ -424,6 +424,11 @@ func (jw *Watcher) watchAllocationLogs(allocation *nomad.Allocation, lines chan 
 					*allocation.Job.Name, allocation.ID, frame.File, frame.Offset)
 				return nil
 			}
+			if frame == nil || frame.Data == nil {
+				log.Printf("stdoutFrames got nil frame! %s %s %s %d\n",
+					*allocation.Job.Name, allocation.ID, frame.File, frame.Offset)
+				continue
+			}
 			jw.handleFrame(frame, allocation, lines, &prevLineStdout)
 
 		case frame, more := <-stderrFrames:
@@ -431,6 +436,11 @@ func (jw *Watcher) watchAllocationLogs(allocation *nomad.Allocation, lines chan 
 				log.Printf("stderrFrames closed! %s %s %s %d\n",
 					*allocation.Job.Name, allocation.ID, frame.File, frame.Offset)
 				return nil
+			}
+			if frame == nil || frame.Data == nil {
+				log.Printf("stderrFrames got nil frame! %s %s %s %d\n",
+					*allocation.Job.Name, allocation.ID, frame.File, frame.Offset)
+				continue
 			}
 			jw.handleFrame(frame, allocation, lines, &prevLineStderr)
 
